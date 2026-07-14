@@ -5,6 +5,12 @@
 faster-whisper>=1.1.0
 silero-vad>=5.1
 
+# CUDA runtime DLLs for faster-whisper's GPU path. ctranslate2 loads these
+# lazily at FIRST INFERENCE, so a missing DLL passes every startup check and
+# then crashes the first real transcription. Not needed for --no-gpu.
+nvidia-cublas-cu12>=12.0
+nvidia-cudnn-cu12>=9.0
+
 # Voice output: local TTS, with a cloud fallback
 kokoro-onnx>=0.4.0
 onnxruntime>=1.17.0

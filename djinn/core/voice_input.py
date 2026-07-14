@@ -81,6 +81,30 @@ class SileroVAD:
 # faster-whisper STT wrapper
 # ---------------------------------------------------------------------------
 
+def _register_cuda_dlls() -> None:
+    """Make the pip-installed CUDA DLLs findable on Windows.
+
+    ctranslate2 loads cuBLAS/cuDNN dynamically at FIRST INFERENCE, not at
+    model load — so a missing DLL passes every startup check and then kills
+    the first real transcription. The DLLs come from the nvidia-cublas-cu12 /
+    nvidia-cudnn-cu12 wheels, whose bin dirs Windows doesn't search by
+    default.
+    """
+    import os
+    import site
+    from pathlib import Path
+
+    for sp in site.getsitepackages():
+        nvidia = Path(sp) / "nvidia"
+        if not nvidia.is_dir():
+            continue
+        for bin_dir in nvidia.glob("*/bin"):
+            os.add_dll_directory(str(bin_dir))
+            # ctranslate2 resolves some DLLs through PATH rather than the
+            # add_dll_directory search path, so set both.
+            os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ["PATH"]
+
+
 class WhisperSTT:
     """faster-whisper speech-to-text with CTranslate2 backend."""
 
@@ -103,6 +127,9 @@ class WhisperSTT:
         """Load the Whisper model. Called once at startup."""
         from faster_whisper import WhisperModel
 
+        if self.device == "cuda":
+            _register_cuda_dlls()
+
         log.info(
             "Loading Whisper '%s' on %s (%s)...",
             self.model_name, self.device, self.compute_type,
@@ -115,6 +142,25 @@ class WhisperSTT:
         )
         dt = time.perf_counter() - t0
         log.info("Whisper loaded in %.1fs", dt)
+
+        # The first CUDA inference pays ~4s of lazy DLL loading and kernel
+        # autotuning. Pay it here, during startup, not on the user's first
+        # question. vad_filter must be off or silence skips the encoder.
+        if self.device == "cuda":
+            t0 = time.perf_counter()
+            segments, _ = self._model.transcribe(
+                np.zeros(16000, dtype=np.float32),
+                beam_size=1, language=self.language, vad_filter=False,
+            )
+            list(segments)
+            log.info("CUDA warmed up in %.1fs", time.perf_counter() - t0)
+
+    def fall_back_to_cpu(self) -> None:
+        """Reload the model on CPU after a GPU failure. Sticky for the run."""
+        log.warning("Reloading Whisper on CPU — expect slower transcription.")
+        self.device = "cpu"
+        self._model = None
+        self.load()
 
     def transcribe(self, audio: np.ndarray) -> str:
         """Transcribe audio buffer to text.
@@ -393,5 +439,22 @@ class VoiceInput:
                 continue
 
             audio = np.concatenate(audio_buffer)
-            text = self.stt.transcribe(audio)
+
+            # An uncaught exception here kills this thread and Djinn goes
+            # permanently deaf while looking alive. GPU trouble (missing
+            # CUDA DLLs, out of VRAM) degrades to CPU instead.
+            try:
+                text = self.stt.transcribe(audio)
+            except Exception as e:
+                log.error("Transcription failed on %s: %s", self.stt.device, e)
+                if self.stt.device == "cuda":
+                    try:
+                        self.stt.fall_back_to_cpu()
+                        text = self.stt.transcribe(audio)
+                    except Exception as e2:
+                        log.error("CPU fallback also failed: %s", e2)
+                        text = ""
+                else:
+                    text = ""
+
             self._result_queue.put(text)

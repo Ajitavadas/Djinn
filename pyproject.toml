@@ -22,6 +22,8 @@ dependencies = [
     # System
     "keyboard>=0.13.5",
     "google-genai>=2.11.0",
+    "nvidia-cublas-cu12>=12.9.2.10",
+    "nvidia-cudnn-cu12>=9.24.0.43",
 ]
 
 [project.scripts]

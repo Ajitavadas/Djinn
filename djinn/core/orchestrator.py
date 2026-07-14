@@ -74,6 +74,7 @@ class Orchestrator:
             min_speech_ms=vad_cfg.get("min_speech_ms", 250),
             max_speech_s=vad_cfg.get("max_speech_s", 30.0),
             sample_rate=vad_cfg.get("sample_rate", 16000),
+            input_device=vad_cfg.get("input_device"),
             whisper_model=whisper_cfg.get("model", "distil-large-v3"),
             whisper_device=whisper_device,
             whisper_compute=whisper_cfg.get("compute_type", "int8"),

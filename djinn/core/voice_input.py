@@ -172,6 +172,7 @@ class VoiceInput:
         min_speech_ms: int = 250,
         max_speech_s: float = 30.0,
         sample_rate: int = 16000,
+        input_device: Optional[str | int] = None,
         whisper_model: str = "distil-large-v3",
         whisper_device: str = "cuda",
         whisper_compute: str = "int8",
@@ -179,6 +180,8 @@ class VoiceInput:
         whisper_language: str = "en",
     ):
         self.sample_rate = sample_rate
+        self.input_device = input_device
+        self._device_index: Optional[int] = None
         self.min_silence_ms = min_silence_ms
         self.min_speech_ms = min_speech_ms
         self.max_speech_s = max_speech_s
@@ -210,10 +213,45 @@ class VoiceInput:
         self.vad.load()
         self.stt.load()
 
+    def _resolve_device(self) -> None:
+        """Pick the microphone to capture from.
+
+        The system default is not trustworthy: on desktops it is often a
+        phantom Realtek "Microphone Array" with nothing plugged into it, which
+        delivers perfect silence and makes Djinn look deaf. So the device can
+        be pinned in config by name substring (survives index reshuffling when
+        Bluetooth devices come and go) or by index.
+        """
+        chosen = None
+
+        if isinstance(self.input_device, int):
+            chosen = self.input_device
+        elif isinstance(self.input_device, str) and self.input_device.strip():
+            want = self.input_device.lower()
+            for idx, dev in enumerate(sd.query_devices()):
+                if dev["max_input_channels"] < 1 or want not in dev["name"].lower():
+                    continue
+                try:
+                    sd.check_input_settings(device=idx, samplerate=self.sample_rate)
+                except Exception:
+                    continue  # this host API can't do 16kHz; another entry will
+                chosen = idx
+                break
+            if chosen is None:
+                log.warning(
+                    "No input device matching %r found (is it connected?). "
+                    "Falling back to the system default.", self.input_device,
+                )
+
+        self._device_index = chosen
+        name = sd.query_devices(chosen, kind="input")["name"]
+        log.info("Microphone: %s%s", name, "" if chosen is not None else " (system default)")
+
     def start(self) -> None:
         """Start background audio capture thread."""
         if self._running:
             return
+        self._resolve_device()
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
@@ -269,6 +307,7 @@ class VoiceInput:
             speech_start = 0.0
             silence_start = 0.0
             total_speech_chunks = 0
+            peak_level = 0.0
 
             self.vad.reset()
 
@@ -278,6 +317,7 @@ class VoiceInput:
                     channels=1,
                     dtype="float32",
                     blocksize=self.chunk_samples,
+                    device=self._device_index,
                 ) as stream:
                     while self._running and self._listening:
                         data, overflowed = stream.read(self.chunk_samples)
@@ -285,6 +325,7 @@ class VoiceInput:
                             log.warning("Audio buffer overflowed")
 
                         chunk = data[:, 0]  # mono
+                        peak_level = max(peak_level, float(np.abs(chunk).max()))
                         speech_detected = self.vad.is_speech(chunk)
 
                         if speech_detected:
@@ -335,7 +376,19 @@ class VoiceInput:
 
             # --- Transcription phase ---
             if not audio_buffer or total_speech_chunks < int(self.min_speech_ms / self.chunk_ms):
-                log.debug("Too short or no speech detected, ignoring")
+                # Say WHY out loud in the log — this used to fail silently and
+                # made a dead microphone indistinguishable from a working one.
+                if peak_level < 0.001:
+                    log.warning(
+                        "No audio at all (peak %.5f) — the microphone is "
+                        "delivering silence. Wrong input device? Set "
+                        "vad.input_device in config.yaml.", peak_level,
+                    )
+                else:
+                    log.info(
+                        "Didn't catch that (peak level %.3f, %d speech chunks) "
+                        "— too short or too quiet.", peak_level, total_speech_chunks,
+                    )
                 self._result_queue.put("")
                 continue
 

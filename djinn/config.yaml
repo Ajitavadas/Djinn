@@ -19,8 +19,11 @@ tts:
   # Whichever is not primary is used as the fallback, so Djinn keeps talking if
   # the network drops.
   primary: "edge"
-  kokoro_voice: "af_heart"
-  edge_voice: "en-IN-NeerjaNeural"
+  # Male voices. Other Edge options: en-US-GuyNeural, en-US-ChristopherNeural,
+  # en-GB-RyanNeural. List them all with: uv run edge-tts --list-voices
+  # Kokoro male voices: am_adam, am_michael, am_onyx, bm_george, bm_lewis.
+  kokoro_voice: "am_michael"
+  edge_voice: "en-IN-PrabhatNeural"
   edge_fallback: true
 
   # Speak each sentence as it is generated instead of waiting for the whole
@@ -66,6 +69,11 @@ whisper:
   language: "en"
 
 vad:
+  # Which microphone to record from. The system default is often WRONG on
+  # desktops — a phantom "Microphone Array" jack that delivers pure silence.
+  # Give a name substring (case-insensitive, survives device index changes)
+  # or a sounddevice index. Blank/absent = system default.
+  input_device: "Galaxy Buds"
   threshold: 0.5
   min_speech_ms: 250
   min_silence_ms: 600         # Adaptive: 400-900ms

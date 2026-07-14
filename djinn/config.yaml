@@ -12,10 +12,20 @@ djinn:
   mode: "auto"
 
 tts:
-  primary: "kokoro"           # kokoro | edge
-  kokoro_voice: "af_heart"    # Kokoro voice style
+  # edge   -> Microsoft Edge TTS. Cloud, free, no API key. Synthesizes at ~0.3x
+  #           real time, so synthesis hides completely behind playback.
+  # kokoro -> fully local, works offline, but ~1.6x real time on CPU (i.e.
+  #           SLOWER than real time), so it cannot be hidden and speech drags.
+  # Whichever is not primary is used as the fallback, so Djinn keeps talking if
+  # the network drops.
+  primary: "edge"
+  kokoro_voice: "af_heart"
   edge_voice: "en-IN-NeerjaNeural"
-  edge_fallback: true         # Use Edge TTS when Kokoro fails
+  edge_fallback: true
+
+  # Speak each sentence as it is generated instead of waiting for the whole
+  # reply. Cuts several seconds off time-to-first-word.
+  streaming: true
 
 gemini:
   # backend: vertex   -> Google Cloud Vertex AI. Billed to your GCP project,

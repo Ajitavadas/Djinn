@@ -81,9 +81,12 @@ class Orchestrator:
             whisper_language=whisper_cfg.get("language", "en"),
         )
 
+        # Speak sentences as they are generated, rather than after the full reply.
+        self.streaming = tts_cfg.get("streaming", True)
+
         # Voice Output
         self.voice_output = VoiceOutput(
-            primary=tts_cfg.get("primary", "kokoro"),
+            primary=tts_cfg.get("primary", "edge"),
             kokoro_voice=tts_cfg.get("kokoro_voice", "af_heart"),
             edge_voice=tts_cfg.get("edge_voice", "en-IN-NeerjaNeural"),
             edge_fallback=tts_cfg.get("edge_fallback", True),
@@ -310,11 +313,17 @@ class Orchestrator:
 
         # 3. Send to brain. History goes as real message turns, not spliced
         #    into the prompt, so it is sent exactly once.
+        deep = target == "pro"
+
+        if self.streaming:
+            await self._respond_streaming(query, deep, t0)
+            return
+
         try:
             response = await self.brain.chat(
                 query,
                 history=self.memory.get_history(),
-                deep=(target == "pro"),
+                deep=deep,
             )
         except Exception as e:
             log.error("Brain error: %s", e)
@@ -322,6 +331,53 @@ class Orchestrator:
 
         if response:
             await self._respond(query, response, t0)
+
+    async def _respond_streaming(self, query: str, deep: bool, t0: float) -> None:
+        """Stream the answer straight into the voice, speaking as it arrives.
+
+        The text is tee'd: each chunk goes to the speaker and, in text mode, to
+        the chat window, while being accumulated for memory. Speech therefore
+        starts on the first sentence instead of waiting for the whole reply.
+        """
+        chunks: list[str] = []
+        window = self._chat_window if self.text_only and hasattr(self, "_chat_window") else None
+        first_chunk_at: Optional[float] = None
+
+        async def tee():
+            nonlocal first_chunk_at
+            if window:
+                window.begin_stream()
+            try:
+                async for chunk in self.brain.stream(
+                    query, history=self.memory.get_history(), deep=deep
+                ):
+                    if first_chunk_at is None:
+                        first_chunk_at = time.perf_counter()
+                    chunks.append(chunk)
+                    if window:
+                        window.stream_chunk(chunk)
+                    yield chunk
+            finally:
+                if window:
+                    window.end_stream()
+
+        try:
+            await self.voice_output.speak_streaming(tee())
+        except Exception as e:
+            log.error("Streaming failed: %s", e)
+
+        response = "".join(chunks).strip()
+        if not response:
+            return
+
+        ttft = (first_chunk_at - t0) if first_chunk_at else 0.0
+        log.info(
+            "Response (first text %.1fs, done %.1fs): \"%s\"",
+            ttft, time.perf_counter() - t0, response[:100],
+        )
+
+        self.memory.add("user", query)
+        self.memory.add("assistant", response)
 
     def _resolve_target(self, query: str) -> str:
         """Decide which tier handles this query.

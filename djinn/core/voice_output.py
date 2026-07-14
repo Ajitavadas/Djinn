@@ -188,62 +188,50 @@ class VoiceOutput:
         self._interrupt = threading.Event()
 
     def load(self) -> None:
-        """Load TTS models."""
-        if self.primary == "kokoro":
-            self.kokoro.load()
-            if not self.kokoro.available:
-                log.warning("Kokoro unavailable, falling back to Edge TTS")
-                self.primary = "edge"
-        log.info("Voice output ready (primary=%s, edge_fallback=%s)", self.primary, self.edge_fallback)
+        """Load TTS models.
+
+        Kokoro is loaded even when Edge is primary: Edge needs the network, so
+        Kokoro is what keeps Djinn talking offline.
+        """
+        self.kokoro.load()
+
+        if self.primary == "kokoro" and not self.kokoro.available:
+            log.warning("Kokoro unavailable, switching to Edge TTS")
+            self.primary = "edge"
+
+        fallback = "kokoro" if self.primary == "edge" else "edge"
+        log.info("Voice output ready (primary=%s, fallback=%s)", self.primary, fallback)
 
     def interrupt(self) -> None:
         """Stop current playback immediately (barge-in)."""
         self._interrupt.set()
 
     async def speak(self, text: str) -> None:
-        """Speak text. Uses primary TTS, falls back to Edge if needed.
+        """Speak a complete block of text.
 
         Args:
             text: Full text to speak.
         """
-        self._interrupt.clear()
-        self._playing = True
 
-        try:
-            # Split into sentences for streaming feel
-            sentences = SENTENCE_SPLIT.split(text)
-            sentences = [s.strip() for s in sentences if s.strip()]
+        async def once():
+            yield text
 
-            if not sentences:
-                return
-
-            for sentence in sentences:
-                if self._interrupt.is_set():
-                    log.debug("Speech interrupted")
-                    break
-
-                result = None
-
-                # Try primary TTS
-                if self.primary == "kokoro" and self.kokoro.available:
-                    result = self.kokoro.synthesize(sentence)
-
-                # Fallback to Edge TTS
-                if result is None and self.edge_fallback:
-                    result = await self.edge.synthesize(sentence)
-
-                if result is None:
-                    log.warning("Both TTS engines failed for: %s", sentence[:50])
-                    continue
-
-                samples, sample_rate = result
-                await self._play_audio(samples, sample_rate)
-
-        finally:
-            self._playing = False
+        await self.speak_streaming(once())
 
     async def speak_streaming(self, text_generator) -> None:
-        """Speak text as it streams from LLM, sentence by sentence.
+        """Speak text as it arrives, synthesizing ahead of playback.
+
+        Two coroutines run concurrently:
+
+          producer — splits incoming text into sentences and synthesizes them,
+                     pushing finished audio onto a queue.
+          consumer — plays queued audio, in order.
+
+        Because they overlap, sentence N+1 is being synthesized while sentence
+        N is still playing, so synthesis time disappears behind playback. That
+        only pays off if synthesis is faster than real time: Edge manages
+        ~0.3x, Kokoro on CPU is ~1.6x (slower than real time) and so cannot be
+        fully hidden. Hence Edge is the default primary.
 
         Args:
             text_generator: Async generator yielding text chunks.
@@ -251,49 +239,72 @@ class VoiceOutput:
         self._interrupt.clear()
         self._playing = True
 
-        try:
+        # Bounded so a fast producer cannot synthesize the whole reply up front
+        # (wasted work if the user barges in).
+        audio_queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+
+        async def producer() -> None:
             buffer = ""
-            async for chunk in text_generator:
-                if self._interrupt.is_set():
-                    break
-
-                buffer += chunk
-
-                # Check for complete sentences
-                while True:
-                    match = SENTENCE_SPLIT.search(buffer)
-                    if not match:
+            try:
+                async for chunk in text_generator:
+                    if self._interrupt.is_set():
                         break
+                    buffer += chunk
 
-                    # Extract complete sentence
-                    sentence = buffer[:match.start()].strip()
-                    buffer = buffer[match.end():]
+                    while True:
+                        match = SENTENCE_SPLIT.search(buffer)
+                        if not match:
+                            break
+                        sentence = buffer[: match.start()].strip()
+                        buffer = buffer[match.end() :]
+                        if sentence:
+                            await self._enqueue(sentence, audio_queue)
 
-                    if sentence:
-                        await self._speak_sentence(sentence)
+                if buffer.strip() and not self._interrupt.is_set():
+                    await self._enqueue(buffer.strip(), audio_queue)
+            finally:
+                await audio_queue.put(None)  # sentinel: nothing more coming
 
-            # Speak remaining buffer
-            if buffer.strip() and not self._interrupt.is_set():
-                await self._speak_sentence(buffer.strip())
+        async def consumer() -> None:
+            while True:
+                item = await audio_queue.get()
+                if item is None or self._interrupt.is_set():
+                    break
+                samples, sample_rate = item
+                await self._play_audio(samples, sample_rate)
 
+        try:
+            await asyncio.gather(producer(), consumer())
         finally:
             self._playing = False
 
-    async def _speak_sentence(self, sentence: str) -> None:
-        """Synthesize and play a single sentence."""
+    async def _enqueue(self, sentence: str, queue: "asyncio.Queue") -> None:
+        """Synthesize one sentence and queue it for playback."""
         if self._interrupt.is_set():
             return
+        audio = await self._synthesize(sentence)
+        if audio is not None and not self._interrupt.is_set():
+            await queue.put(audio)
 
+    async def _synthesize(self, sentence: str):
+        """Synthesize one sentence with the primary engine, falling back."""
         result = None
-        if self.primary == "kokoro" and self.kokoro.available:
-            result = self.kokoro.synthesize(sentence)
-        if result is None and self.edge_fallback:
-            result = await self.edge.synthesize(sentence)
-        if result is None:
-            return
 
-        samples, sample_rate = result
-        await self._play_audio(samples, sample_rate)
+        if self.primary == "edge":
+            result = await self.edge.synthesize(sentence)
+            if result is None and self.kokoro.available:
+                result = await asyncio.to_thread(self.kokoro.synthesize, sentence)
+        else:
+            if self.kokoro.available:
+                # Kokoro is blocking CPU work. Off the event loop it goes, or
+                # it stalls playback and defeats the whole pipeline.
+                result = await asyncio.to_thread(self.kokoro.synthesize, sentence)
+            if result is None and self.edge_fallback:
+                result = await self.edge.synthesize(sentence)
+
+        if result is None:
+            log.warning("Both TTS engines failed for: %s", sentence[:50])
+        return result
 
     async def _play_audio(self, samples: np.ndarray, sample_rate: int) -> None:
         """Play audio samples through speakers, interruptible.

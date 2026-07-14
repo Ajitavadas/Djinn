@@ -82,6 +82,52 @@ class ChatWindow:
         if self._root and self._chat_display:
             self._root.after(0, self._do_append, role, text)
 
+    # --- Streaming display -------------------------------------------------
+    # So the reply appears as it is generated, rather than after Djinn has
+    # finished speaking it.
+
+    def begin_stream(self) -> None:
+        """Start an incrementally-written Djinn message."""
+        if self._root:
+            self._root.after(0, self._do_begin_stream)
+
+    def stream_chunk(self, text: str) -> None:
+        """Append a chunk to the message in progress."""
+        if self._root:
+            self._root.after(0, self._do_stream_chunk, text)
+
+    def end_stream(self) -> None:
+        """Finish the message in progress."""
+        if self._root:
+            self._root.after(0, self._do_end_stream)
+
+    def _do_begin_stream(self) -> None:
+        display = self._chat_display
+        if not display:
+            return
+        display.configure(state=tk.NORMAL)
+        display.insert(tk.END, "Djinn: ", "djinn_tag")
+        display.configure(state=tk.DISABLED)
+        display.see(tk.END)
+
+    def _do_stream_chunk(self, text: str) -> None:
+        display = self._chat_display
+        if not display:
+            return
+        display.configure(state=tk.NORMAL)
+        display.insert(tk.END, text, "text_tag")
+        display.configure(state=tk.DISABLED)
+        display.see(tk.END)
+
+    def _do_end_stream(self) -> None:
+        display = self._chat_display
+        if not display:
+            return
+        display.configure(state=tk.NORMAL)
+        display.insert(tk.END, "\n\n", "text_tag")
+        display.configure(state=tk.DISABLED)
+        display.see(tk.END)
+
     # ------------------------------------------------------------------
     # Internal — tkinter thread
     # ------------------------------------------------------------------

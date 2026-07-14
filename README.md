@@ -138,11 +138,29 @@ djinn/
   ui/         tkinter chat window
 ```
 
+## Speech and latency
+
+Djinn speaks each sentence as it is generated, rather than waiting for the whole
+reply, and synthesizes the *next* sentence while the current one plays. Typical
+time to first spoken word is **~1.5–2s**.
+
+Two TTS engines ship, and which one is primary matters more than it looks:
+
+| Engine | Speed | Notes |
+|---|---|---|
+| **Edge** (default) | ~0.3x real time | Cloud, free, no API key |
+| Kokoro | ~1.6x real time on CPU | Fully local, works offline |
+
+The ratio is the point. Edge synthesizes *faster* than it plays, so synthesis
+disappears behind playback entirely. Kokoro on a CPU is **slower than real time**,
+so it can never be hidden and speech drags no matter how it is pipelined. Edge is
+primary for that reason; Kokoro stays loaded as the offline fallback. Set
+`tts.primary: kokoro` if you would rather never touch the network.
+
 ## Status
 
-Working: voice pipeline, both model tiers, tools, working memory, mode switching.
+Working: voice pipeline, both model tiers, tools, streaming speech, working
+memory, mode switching.
 
 Not yet built: long-term memory (`memory/longterm.py`), offline Ollama fallback
-(`brain/local_llm.py`), system tray and gaming overlay (`ui/`). Response streaming
-is implemented in the brain but not yet wired into TTS, so speech currently waits
-for the full reply.
+(`brain/local_llm.py`), system tray and gaming overlay (`ui/`).

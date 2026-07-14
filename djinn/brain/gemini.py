@@ -302,26 +302,86 @@ class GeminiBrain:
         memories: str = "",
         deep: bool = False,
     ) -> AsyncGenerator[str, None]:
-        """Stream the response in chunks as it is generated.
+        """Stream the answer in chunks, running tools as needed.
 
-        Pair with VoiceOutput.speak_streaming() so Djinn starts speaking the
+        Pairs with VoiceOutput.speak_streaming(): Djinn starts speaking the
         first sentence while the rest is still being written.
+
+        Tool calls are handled as in chat() — when the model asks for tools we
+        run them and keep going. A turn that ends in tool calls yields nothing,
+        so the user never hears "let me look that up"; only the final answer,
+        the round with no tool calls, is spoken.
         """
         if not self._ready:
             yield "Gemini is not initialized."
             return
 
+        from google.genai import types
+
+        from djinn.tools import registry
+
         model = self.pro_model if deep else self.flash_model
+        contents = self._build_contents(query, history or [])
+        config = self._config(deep, memories, with_tools=True)
 
         try:
-            stream = await self._client.aio.models.generate_content_stream(
-                model=model,
-                contents=self._build_contents(query, history or []),
-                config=self._config(deep, memories),
-            )
-            async for chunk in stream:
-                if chunk.text:
-                    yield chunk.text
+            for _round in range(MAX_TOOL_ROUNDS):
+                calls: list = []
+                parts_seen: list = []
+                pending_text: list[str] = []
+                emitted = False
+
+                stream = await self._client.aio.models.generate_content_stream(
+                    model=model, contents=contents, config=config
+                )
+
+                async for chunk in stream:
+                    candidate = chunk.candidates[0] if chunk.candidates else None
+                    if not candidate or not candidate.content:
+                        continue
+
+                    for part in candidate.content.parts or []:
+                        parts_seen.append(part)
+
+                        if part.function_call:
+                            calls.append(part.function_call)
+                            pending_text.clear()  # it was preamble, not an answer
+                        elif part.text:
+                            if calls:
+                                continue  # trailing narration around a tool call
+                            pending_text.append(part.text)
+
+                    # Nothing has asked for a tool yet, so this text is the real
+                    # answer — release it and start the voice going.
+                    if not calls and pending_text:
+                        for piece in pending_text:
+                            emitted = True
+                            yield piece
+                        pending_text.clear()
+
+                if not calls:
+                    if not emitted:
+                        yield "I didn't get a response for that."
+                    return
+
+                # Hand the tool results back and go round again.
+                contents.append(types.Content(role="model", parts=parts_seen))
+                results = await asyncio.gather(
+                    *(registry.dispatch(c.name, dict(c.args or {})) for c in calls)
+                )
+                contents.append(
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_function_response(
+                                name=call.name, response={"result": result}
+                            )
+                            for call, result in zip(calls, results)
+                        ],
+                    )
+                )
+
+            yield "I got stuck looking that up. Could you rephrase?"
 
         except Exception as e:
             log.error("%s streaming error: %s", model, e)

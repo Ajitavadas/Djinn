@@ -1,0 +1,122 @@
+djinn:
+  name: "Dasaj"
+  wake_hotkey: "ctrl+alt+d"    # hold to speak (voice mode)
+  mode_hotkey: "ctrl+alt+m"    # cycle auto -> fast -> pro (voice mode)
+
+  # Which model tier to use:
+  #   auto -> the router picks local / fast / deep per query
+  #   fast -> always the fast tier (never pro)
+  #   pro  -> always the deep tier (never flash)
+  # Override at launch with --mode, or at runtime with the hotkey / the badge
+  # in the chat window / the /auto /fast /pro commands.
+  mode: "auto"
+
+tts:
+  primary: "kokoro"           # kokoro | edge
+  kokoro_voice: "af_heart"    # Kokoro voice style
+  edge_voice: "en-IN-NeerjaNeural"
+  edge_fallback: true         # Use Edge TTS when Kokoro fails
+
+gemini:
+  # backend: vertex   -> Google Cloud Vertex AI. Billed to your GCP project,
+  #                      so it draws on your Cloud credits. Auth via ADC:
+  #                        gcloud auth application-default login
+  #                      No API key is used.
+  # backend: aistudio -> Google AI Studio. Uses GEMINI_API_KEY from .env.
+  #                      Needs prepaid credits ON THE KEY; Cloud credits do
+  #                      not apply to it.
+  backend: "vertex"
+
+  # Vertex settings (ignored when backend is aistudio)
+  # Leave project blank and set GOOGLE_CLOUD_PROJECT in .env instead — that
+  # keeps your project id out of version control.
+  project: ""
+  location: "global"     # "global" serves Gemini everywhere; region names like
+                         # asia-east2 do not host every model
+
+  # AI Studio settings (ignored when backend is vertex)
+  api_key: ""            # leave blank; loaded from .env as GEMINI_API_KEY
+
+  # gemini-2.0-pro was never a real model — it 404s. These are verified live.
+  flash_model: "gemini-2.5-flash"   # fast tier, thinking disabled for latency
+  pro_model: "gemini-2.5-pro"       # deep tier, thinking enabled
+
+  # Gemini deducts thinking tokens from max_output_tokens. If thinking is
+  # uncapped on a small budget it eats the whole allowance and returns an
+  # EMPTY reply. So the deep tier gets a bigger budget AND a thinking cap.
+  max_output_tokens: 800            # fast tier — spoken replies stay short
+  pro_max_output_tokens: 2048       # deep tier — total budget
+  pro_thinking_budget: 1024         # of which at most this much is thinking
+
+whisper:
+  model: "distil-large-v3"
+  device: "cuda"
+  compute_type: "int8"
+  beam_size: 1                # Minimize latency
+  language: "en"
+
+vad:
+  threshold: 0.5
+  min_speech_ms: 250
+  min_silence_ms: 600         # Adaptive: 400-900ms
+  max_speech_s: 30            # Max recording length
+  sample_rate: 16000
+
+tools:
+  enabled: true
+
+  # Every file read/write is confined to this folder. Paths that escape it —
+  # via .., an absolute path, or a symlink — are refused. This matters because
+  # web_search results are fed back into the model, so a hostile page could try
+  # to talk Djinn into touching something it shouldn't.
+  workspace: "~/Djinn"
+
+  # run_python executes real code with your privileges. It is timed out and run
+  # in a scratch directory, but it is NOT sandboxed — it can reach your disk and
+  # the network. Off by default, on purpose.
+  allow_code_execution: false
+
+memory:
+  working_window: 12          # Conversation turns for Flash
+  working_window_local: 6     # Turns for local LLM
+  sqlite_path: "./data/djinn.db"
+
+ollama:
+  model: "qwen3:4b"
+  base_url: "http://localhost:11434"
+  num_ctx: 4096
+  cpu_only: true              # Reserve GPU for Whisper
+
+# Note: conversation history is passed as real message turns, not spliced into
+# this prompt, so there is no {context} placeholder. Only {name} and {memories}.
+system_prompt: |
+  You are Djinn, a personal AI assistant for {name}.
+  You are concise, technical, and direct — no filler phrases.
+  You speak naturally, like a knowledgeable friend.
+  When asked to do something, do it. Don't explain what you're about to do.
+
+  Your replies are spoken aloud, so keep them short — two or three sentences
+  unless asked for detail. Never use markdown, bullet points, or emoji.
+
+  You have tools, but you are not required to use them. Answer directly from
+  what you already know whenever you can — most questions need no tool at all.
+  Reach for a tool only when it genuinely adds something you cannot do yourself.
+
+  - web_search: your knowledge has a training cutoff, so search whenever the
+    answer depends on current facts — news, prices, releases, versions, people,
+    anything recent, and anything you are genuinely unsure about. If you catch
+    yourself about to say something does not exist, search first. Report what
+    you found; don't narrate that you searched.
+  - open_app / close_app / set_volume / lock_screen: control the PC.
+  - get_clipboard / set_clipboard: read and write the clipboard.
+  - read_file / write_file / list_dir: the user's workspace folder.
+  - run_python: only for heavy computation or data wrangling. Never for
+    arithmetic, dates, or anything you can work out in your head.
+
+  Never claim you performed an action unless you actually called the tool and
+  it succeeded, and never invent a capability you do not have. If a tool you
+  need is unavailable, say so — but never offer a disabled tool as an excuse
+  for something you could simply have answered.
+
+  Relevant memories:
+  {memories}

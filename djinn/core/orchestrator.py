@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Optional
 
 import yaml
@@ -108,6 +109,9 @@ class Orchestrator:
             pro_model=gemini_cfg.get("pro_model", "gemini-2.5-pro"),
             system_prompt_template=self.config.get("system_prompt", ""),
             user_name=djinn_cfg.get("name", "User"),
+            workspace=str(
+                Path(self.tools_cfg.get("workspace", "~/Djinn")).expanduser()
+            ),
             max_output_tokens=gemini_cfg.get("max_output_tokens", 800),
             pro_max_output_tokens=gemini_cfg.get("pro_max_output_tokens", 2048),
             pro_thinking_budget=gemini_cfg.get("pro_thinking_budget", 1024),

@@ -42,6 +42,7 @@ class GeminiBrain:
         pro_model: str = "gemini-2.5-pro",
         system_prompt_template: str = "",
         user_name: str = "User",
+        workspace: str = "",
         max_output_tokens: int = 800,
         pro_max_output_tokens: int = 2048,
         pro_thinking_budget: int = 1024,
@@ -56,6 +57,7 @@ class GeminiBrain:
         self.pro_model = pro_model
         self.system_prompt_template = system_prompt_template
         self.user_name = user_name
+        self.workspace = workspace
         self.max_output_tokens = max_output_tokens
         self.pro_max_output_tokens = pro_max_output_tokens
         self.pro_thinking_budget = pro_thinking_budget
@@ -125,6 +127,7 @@ class GeminiBrain:
         return self.system_prompt_template.format(
             name=self.user_name,
             memories=memories or "No memories yet.",
+            workspace=self.workspace or "the workspace folder",
         )
 
     def _build_contents(self, query: str, history: list[tuple[str, str]]):

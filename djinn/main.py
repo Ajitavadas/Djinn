@@ -78,11 +78,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         default=None,
-        choices=["auto", "fast", "pro"],
+        choices=["auto", "fast", "pro", "local"],
         help=(
             "Which model tier to use. auto = router decides per query "
             "(default), fast = always the fast tier, pro = always the deep "
-            "tier. Switch at runtime with Ctrl+Alt+M, or /fast /pro /auto."
+            "tier, local = always the local Ollama model. Switch at runtime "
+            "with Ctrl+Alt+M, or /auto /fast /pro /local."
         ),
     )
     return parser.parse_args()

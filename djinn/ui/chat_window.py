@@ -22,11 +22,12 @@ class ChatWindow:
     """
 
     # Cycle order for the mode toggle.
-    MODES = ("auto", "fast", "pro")
+    MODES = ("auto", "fast", "pro", "local")
     MODE_STYLE = {
         "auto": ("AUTO", "#53d8fb", "router decides"),
         "fast": ("FAST", "#3ddc84", "always fast tier"),
         "pro": ("PRO", "#e94560", "always deep tier"),
+        "local": ("LOCAL", "#f5a623", "local model via Ollama"),
     }
 
     def __init__(
@@ -271,8 +272,8 @@ class ChatWindow:
         self._do_append(
             "system",
             "Djinn is ready. Type and press Enter.  "
-            "Ctrl+M or the badge above cycles AUTO / FAST / PRO "
-            "(or type /auto, /fast, /pro).",
+            "Ctrl+M or the badge above cycles AUTO / FAST / PRO / LOCAL "
+            "(or type /auto, /fast, /pro, /local).",
         )
 
         # --- Keyboard focus ---------------------------------------------

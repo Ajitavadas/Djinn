@@ -19,7 +19,8 @@ import keyboard
 from djinn.core.voice_input import VoiceInput
 from djinn.core.voice_output import VoiceOutput
 from djinn.core import router
-from djinn.brain.gemini import GeminiBrain
+from djinn.brain.gemini import GeminiBrain, GeminiUnreachable
+from djinn.brain.local_llm import LocalBrain
 from djinn.memory.working import WorkingMemory
 from djinn.tools import registry
 from djinn.ui.chat_window import ChatWindow
@@ -34,7 +35,8 @@ class Orchestrator:
     #   auto -> router picks local / flash / pro per query
     #   fast -> always the fast tier (never pro)
     #   pro  -> always the deep tier (never flash)
-    MODES = ("auto", "fast", "pro")
+    #   local -> always the local Ollama model (offline, free)
+    MODES = ("auto", "fast", "pro", "local")
 
     def __init__(
         self,
@@ -61,6 +63,7 @@ class Orchestrator:
         vad_cfg = self.config.get("vad", {})
         tts_cfg = self.config.get("tts", {})
         gemini_cfg = self.config.get("gemini", {})
+        ollama_cfg = self.config.get("ollama", {})
         memory_cfg = self.config.get("memory", {})
         self.tools_cfg = self.config.get("tools", {})
 
@@ -90,7 +93,7 @@ class Orchestrator:
         self.voice_output = VoiceOutput(
             primary=tts_cfg.get("primary", "edge"),
             kokoro_voice=tts_cfg.get("kokoro_voice", "af_heart"),
-            edge_voice=tts_cfg.get("edge_voice", "en-IN-NeerjaNeural"),
+            edge_voice=tts_cfg.get("edge_voice", "en-IE-ConnorNeural"),
             edge_fallback=tts_cfg.get("edge_fallback", True),
         )
 
@@ -118,10 +121,30 @@ class Orchestrator:
             use_tools=self.tools_cfg.get("enabled", True),
         )
 
+        # Local model: pinned with the "local" mode, and the fallback whenever
+        # Gemini is unconfigured or unreachable.
+        self.local_brain = LocalBrain(
+            model=ollama_cfg.get("model", "qwen3.5:2b-q4_K_M"),
+            base_url=ollama_cfg.get("base_url", "http://localhost:11434"),
+            num_ctx=ollama_cfg.get("num_ctx", 4096),
+            num_gpu=ollama_cfg.get("num_gpu"),
+            think=ollama_cfg.get("think", False),
+            keep_alive=ollama_cfg.get("keep_alive", "30m"),
+            options=ollama_cfg.get("options"),
+            system_prompt_template=self.config.get("system_prompt", ""),
+            user_name=djinn_cfg.get("name", "User"),
+            workspace=str(
+                Path(self.tools_cfg.get("workspace", "~/Djinn")).expanduser()
+            ),
+            use_tools=self.tools_cfg.get("enabled", True),
+        )
+
         # Memory
         self.memory = WorkingMemory(
             window_size=memory_cfg.get("working_window", 12),
         )
+        # A small local model has a small context, so it sees fewer turns.
+        self.local_window = memory_cfg.get("working_window_local", 6)
 
     def _load_config(self, path: str) -> dict:
         """Load YAML configuration file."""
@@ -151,11 +174,23 @@ class Orchestrator:
             self.voice_input.load()
             self.voice_input.start()
 
-        # Initialize brain
+        # Initialize brains
         self.brain.initialize()
+        self.local_brain.initialize()
 
-        # Tools reuse the brain's client for grounded web lookups.
-        if self.brain.ready and self.tools_cfg.get("enabled", True):
+        if not self.brain.ready and not self.local_brain.ready:
+            log.error("Neither Gemini nor the local model is available.")
+        elif not self.brain.ready:
+            log.warning("Gemini unavailable — every query goes to the local model.")
+
+        # Only load the local weights up front if they are going to be used:
+        # on an 8 GB machine they are not worth holding "just in case".
+        if self.local_brain.ready and (self.mode == "local" or not self.brain.ready):
+            await self.local_brain.warm_up()
+
+        # Tools reuse Gemini's client for grounded web lookups. Without Gemini
+        # they still work for the local model, minus web_search.
+        if (self.brain.ready or self.local_brain.ready) and self.tools_cfg.get("enabled", True):
             registry.configure(
                 client=self.brain.client,
                 search_model=self.brain.flash_model,
@@ -166,6 +201,7 @@ class Orchestrator:
             )
         else:
             self.brain.use_tools = False
+            self.local_brain.use_tools = False
             log.info("Tools disabled")
 
         log.info("━" * 50)
@@ -210,7 +246,7 @@ class Orchestrator:
             loop.call_soon_threadsafe(mode_changed.set)
 
         keyboard.add_hotkey(self.mode_hotkey, on_mode_hotkey, suppress=False)
-        log.info("Hotkey registered: %s (cycle auto/fast/pro)", self.mode_hotkey)
+        log.info("Hotkey registered: %s (cycle auto/fast/pro/local)", self.mode_hotkey)
 
         async def watch_mode_hotkey() -> None:
             while self._running:
@@ -286,7 +322,7 @@ class Orchestrator:
                     self._chat_window.append_message(
                         "system",
                         f"Unknown command /{cmd}. "
-                        "Try /auto, /fast, /pro, /clear.",
+                        "Try /auto, /fast, /pro, /local, /clear.",
                     )
                 continue
 
@@ -313,23 +349,41 @@ class Orchestrator:
                 await self._respond(query, response, t0)
                 return
 
-            # If local handler returned nothing, fall through to the fast tier
-            target = "flash"
+            # If local handler returned nothing, fall through to the fast tier —
+            # or the local model, if that is pinned or Gemini is unavailable.
+            target = (
+                "ollama"
+                if self.mode == "local" or not self.brain.ready
+                else "flash"
+            )
 
         # 3. Send to brain. History goes as real message turns, not spliced
         #    into the prompt, so it is sent exactly once.
         deep = target == "pro"
 
         if self.streaming:
-            await self._respond_streaming(query, deep, t0)
+            await self._respond_streaming(query, target, t0)
             return
 
         try:
-            response = await self.brain.chat(
-                query,
-                history=self.memory.get_history(),
-                deep=deep,
-            )
+            if target == "ollama":
+                response = await self.local_brain.chat(
+                    query, history=self._local_history()
+                )
+            else:
+                try:
+                    response = await self.brain.chat(
+                        query, history=self.memory.get_history(), deep=deep
+                    )
+                except GeminiUnreachable as e:
+                    if not self.local_brain.ready:
+                        raise
+                    log.warning("Gemini unreachable (%s) — using the local model", e)
+                    response = await self.local_brain.chat(
+                        query, history=self._local_history()
+                    )
+        except GeminiUnreachable:
+            response = "I can't reach Gemini, and the local model isn't running."
         except Exception as e:
             log.error("Brain error: %s", e)
             response = "Sorry, I had trouble processing that. Try again?"
@@ -337,7 +391,41 @@ class Orchestrator:
         if response:
             await self._respond(query, response, t0)
 
-    async def _respond_streaming(self, query: str, deep: bool, t0: float) -> None:
+    def _local_history(self):
+        """The most recent turns only — the local model's context is small."""
+        history = self.memory.get_history()
+        return history[-self.local_window:] if self.local_window else []
+
+    async def _brain_stream(self, query: str, target: str):
+        """Stream from the brain for this target, falling back to local if offline.
+
+        GeminiUnreachable is only raised before Gemini has said anything, so
+        switching to the local model here never repeats half an answer.
+        """
+        if target == "ollama":
+            async for chunk in self.local_brain.stream(
+                query, history=self._local_history()
+            ):
+                yield chunk
+            return
+
+        try:
+            async for chunk in self.brain.stream(
+                query, history=self.memory.get_history(), deep=target == "pro"
+            ):
+                yield chunk
+        except GeminiUnreachable as e:
+            if not self.local_brain.ready:
+                log.error("Gemini unreachable (%s) and no local model", e)
+                yield "I can't reach Gemini, and the local model isn't running."
+                return
+            log.warning("Gemini unreachable (%s) — using the local model", e)
+            async for chunk in self.local_brain.stream(
+                query, history=self._local_history()
+            ):
+                yield chunk
+
+    async def _respond_streaming(self, query: str, target: str, t0: float) -> None:
         """Stream the answer straight into the voice, speaking as it arrives.
 
         The text is tee'd: each chunk goes to the speaker and, in text mode, to
@@ -353,9 +441,7 @@ class Orchestrator:
             if window:
                 window.begin_stream()
             try:
-                async for chunk in self.brain.stream(
-                    query, history=self.memory.get_history(), deep=deep
-                ):
+                async for chunk in self._brain_stream(query, target):
                     if first_chunk_at is None:
                         first_chunk_at = time.perf_counter()
                     chunks.append(chunk)
@@ -387,13 +473,18 @@ class Orchestrator:
     def _resolve_target(self, query: str) -> str:
         """Decide which tier handles this query.
 
-        In auto mode the router decides. In fast/pro mode the user has pinned
-        a tier, so we skip the router — except for the local shortcuts (time,
-        date), which are instant and free and worth keeping in every mode.
+        In auto mode the router decides. In fast/pro/local mode the user has
+        pinned a tier, so we skip the router — except for the local shortcuts
+        (time, date), which are instant and free and worth keeping in every
+        mode. Without Gemini, everything that needs a model goes to Ollama.
         """
         target = router.route(query)
 
-        if self.mode == "auto" or target == "local":
+        if target == "local":
+            return target
+        if self.mode == "local" or not self.brain.ready:
+            return "ollama"
+        if self.mode == "auto":
             return target
 
         return "flash" if self.mode == "fast" else "pro"
@@ -408,6 +499,11 @@ class Orchestrator:
             "auto": "Auto mode. I'll pick the right model per question.",
             "fast": "Fast mode. Quick answers only.",
             "pro": "Pro mode. Deeper reasoning, slower replies.",
+            "local": (
+                "Local mode. Running on your own machine."
+                if self.local_brain.ready
+                else "Local mode, but the local model isn't running. Start Ollama first."
+            ),
         }[mode]
 
     def cycle_mode(self) -> str:

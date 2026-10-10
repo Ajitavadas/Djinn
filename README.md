@@ -24,8 +24,11 @@ A **router** classifies each query with regex, so no latency is wasted deciding:
 | `local` | Answered in-process — time, date. No model call. | ~0ms |
 | `fast` | Gemini 2.5 Flash, thinking disabled | ~1s |
 | `deep` | Gemini 2.5 Pro, thinking enabled | ~3s |
+| `ollama` | Qwen3.5-2B on your own machine, via Ollama | ~2-3s on a 4 GB GPU |
 
-You can override the router at any time — see **Modes** below.
+You can override the router at any time — see **Modes** below. The local
+model is never picked automatically while Gemini works. It is used when you pin
+`local` mode, or as a fallback when Gemini is unconfigured or unreachable.
 
 ## Requirements
 
@@ -62,12 +65,30 @@ Then copy `.env.example` to `.env` and set `GOOGLE_CLOUD_PROJECT`.
 `kokoro-v1.0.int8.onnx` and `voices-v1.0.bin` from
 [kokoro-onnx releases](https://github.com/thewh1teagle/kokoro-onnx/releases).
 
+**Optional: the local model.** Install [Ollama](https://ollama.com/download),
+then pull the model:
+
+```bash
+ollama pull qwen3.5:2b-q4_K_M    # 1.9 GB download, 1.6 GB loaded
+```
+
+The default is Qwen3.5-2B because it fits entirely on a 4 GB GPU next to
+Whisper. On a GTX 1650 Ti it generates ~75 tokens/s and answers in 2–3s, and
+it supports tool calling.
+
+`qwen3.5:4b` (3.3 GB) is the stronger coder (55.8 on LiveCodeBench v6), but on
+a 4 GB card only about half of it fits on the GPU. The CPU runs the rest at
+~8 tokens/s, so answers take 10–17s. A smaller `num_ctx` doesn't help because
+the weights are what don't fit. Pull it and set `ollama.model` if you have
+more VRAM or prefer quality over speed.
+
 ## Run
 
 ```bash
 uv run djinn                 # voice mode — hold Ctrl+Alt+D and speak
 uv run djinn --text-only     # chat window, no microphone
 uv run djinn --mode pro      # pin the deep tier
+uv run djinn --mode local    # pin the local Ollama model
 uv run djinn --no-gpu        # CPU-only Whisper
 ```
 
@@ -80,10 +101,14 @@ Djinn picks a model per query, but you can pin one:
 | `auto` | The router decides (default) |
 | `fast` | Always the fast tier |
 | `pro` | Always the deep tier |
+| `local` | Always the local model. Offline and free. |
 
 Switch at runtime: click the badge in the chat window, press `Ctrl+M`, type
-`/auto` `/fast` `/pro`, or press `Ctrl+Alt+M` in voice mode. Local shortcuts
-(time, date) stay instant in every mode.
+`/auto` `/fast` `/pro` `/local`, or press `Ctrl+Alt+M` in voice mode. Local
+shortcuts (time, date) stay instant in every mode.
+
+The local model gets the same tools as Gemini, except `web_search`, which runs
+through Gemini and so needs a connection.
 
 ## Tools
 
@@ -132,7 +157,7 @@ and return an empty reply, so the deep tier budgets the two separately.
 ```
 djinn/
   core/       orchestrator, router, voice input/output
-  brain/      Gemini client (Vertex + AI Studio)
+  brain/      Gemini client (Vertex + AI Studio), local Ollama client
   tools/      web, apps, files, code + the registry
   memory/     working memory (long-term is a stub)
   ui/         tkinter chat window
@@ -159,8 +184,9 @@ primary for that reason; Kokoro stays loaded as the offline fallback. Set
 
 ## Status
 
-Working: voice pipeline, both model tiers, tools, streaming speech, working
-memory, mode switching.
+Working: voice pipeline, both Gemini tiers, the local Ollama model (pinned or
+as the offline fallback), tools, streaming speech, working memory, mode
+switching.
 
-Not yet built: long-term memory (`memory/longterm.py`), offline Ollama fallback
-(`brain/local_llm.py`), system tray and gaming overlay (`ui/`).
+Not yet built: long-term memory (`memory/longterm.py`), system tray and gaming
+overlay (`ui/`).

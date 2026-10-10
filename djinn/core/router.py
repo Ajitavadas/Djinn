@@ -87,5 +87,6 @@ def get_route_label(target: RouteTarget) -> str:
         "local": "⚡ Local",
         "flash": "🔵 Gemini Flash",
         "pro": "🟣 Gemini Pro",
+        "ollama": "🟢 Local LLM",
     }
     return labels.get(target, target)

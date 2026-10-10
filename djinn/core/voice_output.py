@@ -113,7 +113,7 @@ class KokoroTTS:
 class EdgeTTS:
     """Microsoft Edge TTS — cloud-based, high quality, requires internet."""
 
-    def __init__(self, voice: str = "en-IN-NeerjaNeural"):
+    def __init__(self, voice: str = "en-IE-ConnorNeural"):
         self.voice = voice
 
     async def synthesize(self, text: str) -> Optional[tuple[np.ndarray, int]]:
@@ -175,7 +175,7 @@ class VoiceOutput:
         self,
         primary: str = "kokoro",
         kokoro_voice: str = "af_heart",
-        edge_voice: str = "en-IN-NeerjaNeural",
+        edge_voice: str = "en-IE-ConnorNeural",
         edge_fallback: bool = True,
     ):
         self.primary = primary

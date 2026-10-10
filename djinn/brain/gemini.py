@@ -29,6 +29,34 @@ THINKING_OFF = 0
 MAX_TOOL_ROUNDS = 5
 
 
+class GeminiUnreachable(Exception):
+    """Gemini could not be reached at all — the network, not the request.
+
+    Raised instead of an apology so the orchestrator can hand the query to the
+    local model. Only raised before anything has been said, so a fallback
+    never repeats half an answer.
+    """
+
+
+def _is_offline(e: BaseException) -> bool:
+    """True if e means "no connection", as opposed to a bad request or quota."""
+    import httpx
+
+    try:
+        from google.auth.exceptions import TransportError
+    except ImportError:  # google-auth is a google-genai dependency, but be safe
+        TransportError = ()
+
+    # The SDK and google-auth sometimes wrap the httpx error, so walk the chain.
+    while e is not None:
+        if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout, TransportError)):
+            return True
+        if isinstance(e, OSError) and "getaddrinfo" in str(e).lower():
+            return True
+        e = e.__cause__ or e.__context__
+    return False
+
+
 class GeminiBrain:
     """Gemini client with a fast tier and a deep-reasoning tier."""
 
@@ -224,6 +252,8 @@ class GeminiBrain:
             log.error("Exchange timed out after %.0fs", timeout)
             return "Sorry, that took too long. Try again?"
         except Exception as e:
+            if _is_offline(e):
+                raise GeminiUnreachable(str(e)) from e
             log.error("Brain error: %s", e)
             return self._explain_error(e)
 
@@ -326,6 +356,7 @@ class GeminiBrain:
         model = self.pro_model if deep else self.flash_model
         contents = self._build_contents(query, history or [])
         config = self._config(deep, memories, with_tools=True)
+        spoke = False  # anything yielded yet, in any round
 
         try:
             for _round in range(MAX_TOOL_ROUNDS):
@@ -358,7 +389,7 @@ class GeminiBrain:
                     # answer — release it and start the voice going.
                     if not calls and pending_text:
                         for piece in pending_text:
-                            emitted = True
+                            emitted = spoke = True
                             yield piece
                         pending_text.clear()
 
@@ -387,6 +418,8 @@ class GeminiBrain:
             yield "I got stuck looking that up. Could you rephrase?"
 
         except Exception as e:
+            if not spoke and _is_offline(e):
+                raise GeminiUnreachable(str(e)) from e
             log.error("%s streaming error: %s", model, e)
             yield self._explain_error(e)
 

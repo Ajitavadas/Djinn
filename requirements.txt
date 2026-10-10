@@ -26,6 +26,9 @@ numpy>=2.0.2
 # only one that speaks to Vertex.
 google-genai>=2.11.0
 
+# Local model: talks to Ollama over its HTTP API.
+httpx>=0.28.1
+
 # Memory & config
 pyyaml>=6.0
 peewee>=3.17.0

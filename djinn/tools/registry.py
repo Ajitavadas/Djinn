@@ -97,7 +97,11 @@ def configure(
     workspace: str,
     allow_code_execution: bool = False,
 ) -> None:
-    """Wire up every tool's dependencies. Call once at startup."""
+    """Wire up every tool's dependencies. Call once at startup.
+
+    client may be None when Gemini is unavailable and only the local model
+    runs; web_search, which needs Gemini behind it, is then withheld.
+    """
     web.configure(client, search_model)
     files.configure(workspace)
     code.configure(allow_code_execution)
@@ -107,6 +111,8 @@ def configure(
     _enabled.clear()
     for name in _SPECS:
         gate = _GATED.get(name)
+        if name == "web_search" and client is None:
+            continue
         if gate is None or flags.get(gate, False):
             _enabled.add(name)
 
@@ -152,6 +158,29 @@ def declarations() -> list:
             )
         )
     return decls
+
+
+def json_schemas() -> list[dict]:
+    """The same tools as OpenAI-style function schemas, for Ollama."""
+    schemas = []
+    for name in sorted(_enabled):
+        _fn, description, params = _SPECS[name]
+        schemas.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        param: {"type": ptype, "description": pdesc}
+                        for param, (ptype, pdesc, _req) in params.items()
+                    },
+                    "required": [p for p, (_t, _d, req) in params.items() if req],
+                },
+            },
+        })
+    return schemas
 
 
 def tools() -> list:

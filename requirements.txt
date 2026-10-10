@@ -3,7 +3,9 @@
 
 # Voice input: VAD + speech-to-text
 faster-whisper>=1.1.0
-silero-vad>=5.1
+# VAD is Silero v6, run on onnxruntime from the copy faster-whisper ships.
+# Not the silero-vad package: it pulls in PyTorch (~2 GB), whose torch.dll
+# Windows Smart App Control blocks.
 
 # CUDA runtime DLLs for faster-whisper's GPU path. ctranslate2 loads these
 # lazily at FIRST INFERENCE, so a missing DLL passes every startup check and

@@ -36,6 +36,11 @@ model is never picked automatically while Gemini works. It is used when you pin
 - An NVIDIA GPU is recommended for Whisper (CPU works via `--no-gpu`)
 - A Google Cloud project with billing enabled
 
+Djinn doesn't need PyTorch. The voice detector is Silero v6 running on
+onnxruntime, using the copy of the model that faster-whisper ships. This
+matters on Windows 11 with **Smart App Control** on, because it blocks
+`torch.dll`. Don't add a dependency that pulls PyTorch back in.
+
 ## Setup
 
 ```bash
@@ -96,8 +101,9 @@ tests (`scripts/code_eval.py`):
 Q3 scores as well as Q4 (the gap is within noise), and fits on the GPU. The
 2-bit 9B writes plausible-looking code that does not work. Note that Windows
 reserves ~0.8 GB of any GPU for itself, so a 4 GB card has ~2.8 GB left for
-models. In text mode Djinn forces every layer onto the GPU (Ollama's estimate is
-cautious); with Whisper sharing the card it lets Ollama split.
+models. Djinn forces every layer onto the GPU, because Ollama's own estimate is
+cautious. The 4B and Whisper fit together (3.56 of 4 GB), running at 38
+tokens/s, against 26 when Ollama decides the split.
 
 ## Run
 

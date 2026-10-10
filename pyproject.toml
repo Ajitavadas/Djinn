@@ -7,7 +7,8 @@ requires-python = ">=3.11"
 dependencies = [
     # Core voice pipeline
     "faster-whisper>=1.1.0",
-    "silero-vad>=5.1",
+    # VAD: Silero v6 via onnxruntime, from faster-whisper's bundled model.
+    # Not the silero-vad package: it pulls in PyTorch, blocked by Smart App Control.
     "kokoro-onnx>=0.4.0",
     "onnxruntime>=1.17.0",
     "edge-tts>=6.1.0",

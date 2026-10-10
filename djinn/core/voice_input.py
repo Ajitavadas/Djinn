@@ -21,29 +21,50 @@ log = logging.getLogger("djinn.voice_input")
 # ---------------------------------------------------------------------------
 
 class SileroVAD:
-    """Silero Voice Activity Detection using ONNX runtime.
+    """Silero VAD v6, run directly on onnxruntime — no PyTorch.
 
-    Silero v5 accepts only one chunk size per sample rate: 512 samples at
-    16kHz, 256 at 8kHz. Anything else raises "Input audio chunk is too short".
+    Uses the copy of the model that faster-whisper ships for its own VAD
+    filter, so it needs no extra download or dependency. The silero-vad
+    package is deliberately not used: it imports PyTorch, a 2 GB library, to
+    run a 1 MB model — and Windows Smart App Control blocks torch.dll outright
+    on some machines, which kills voice mode at startup.
+
+    The model is streaming: each call sees 576 samples, the last 64 samples of
+    the previous chunk (context) followed by the new 512-sample chunk, and
+    carries its LSTM state (h, c) from call to call. It is 16 kHz only.
     """
 
-    # Sample rate -> the only chunk size the model will accept.
-    CHUNK_SAMPLES = {16000: 512, 8000: 256}
+    SAMPLE_RATE = 16000
+    CHUNK = 512
+    CONTEXT = 64
 
     def __init__(self, threshold: float = 0.5, sample_rate: int = 16000):
-        if sample_rate not in self.CHUNK_SAMPLES:
+        if sample_rate != self.SAMPLE_RATE:
             raise ValueError(
-                f"Silero VAD supports 8000 or 16000 Hz, got {sample_rate}"
+                f"Silero VAD v6 supports 16000 Hz only, got {sample_rate}"
             )
         self.threshold = threshold
         self.sample_rate = sample_rate
-        self.chunk_samples = self.CHUNK_SAMPLES[sample_rate]
-        self._model = None
+        self.chunk_samples = self.CHUNK
+        self._session = None
 
     def load(self) -> None:
         """Load the Silero VAD ONNX model."""
-        import silero_vad
-        self._model = silero_vad.load_silero_vad(onnx=True)
+        import os
+
+        import onnxruntime
+        from faster_whisper.utils import get_assets_path
+
+        opts = onnxruntime.SessionOptions()
+        # One 512-sample chunk is a tiny graph; threads only add overhead.
+        opts.inter_op_num_threads = 1
+        opts.intra_op_num_threads = 1
+        opts.log_severity_level = 4
+        self._session = onnxruntime.InferenceSession(
+            os.path.join(get_assets_path(), "silero_vad_v6.onnx"),
+            providers=["CPUExecutionProvider"],
+            sess_options=opts,
+        )
         self.reset()
         log.info(
             "Silero VAD loaded (ONNX, threshold=%.2f, chunk=%d samples)",
@@ -52,8 +73,25 @@ class SileroVAD:
 
     def reset(self) -> None:
         """Reset VAD recurrent state between utterances."""
-        if self._model is not None:
-            self._model.reset_states()
+        self._h = np.zeros((1, 1, 128), dtype=np.float32)
+        self._c = np.zeros((1, 1, 128), dtype=np.float32)
+        self._context = np.zeros((1, self.CONTEXT), dtype=np.float32)
+
+    def speech_prob(self, audio_chunk: np.ndarray) -> float:
+        """Probability (0-1) that this chunk contains speech."""
+        if len(audio_chunk) != self.chunk_samples:
+            raise ValueError(
+                f"VAD needs exactly {self.chunk_samples} samples at "
+                f"{self.sample_rate}Hz, got {len(audio_chunk)}"
+            )
+        x = np.concatenate(
+            [self._context, audio_chunk.reshape(1, -1).astype(np.float32)], axis=1
+        )
+        probs, self._h, self._c = self._session.run(
+            None, {"input": x, "h": self._h, "c": self._c}
+        )
+        self._context = x[:, -self.CONTEXT:]
+        return float(probs.reshape(-1)[0])
 
     def is_speech(self, audio_chunk: np.ndarray) -> bool:
         """Check whether an audio chunk contains speech.
@@ -64,17 +102,7 @@ class SileroVAD:
         Returns:
             True if speech probability exceeds threshold.
         """
-        if len(audio_chunk) != self.chunk_samples:
-            raise ValueError(
-                f"VAD needs exactly {self.chunk_samples} samples at "
-                f"{self.sample_rate}Hz, got {len(audio_chunk)}"
-            )
-
-        import torch
-        tensor = torch.from_numpy(audio_chunk).float()
-        with torch.no_grad():
-            speech_prob = self._model(tensor, self.sample_rate)
-        return float(speech_prob) > self.threshold
+        return self.speech_prob(audio_chunk) > self.threshold
 
 
 # ---------------------------------------------------------------------------

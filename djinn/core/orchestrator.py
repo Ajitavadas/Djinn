@@ -123,13 +123,12 @@ class Orchestrator:
 
         # Local model: pinned with the "local" mode, and the fallback whenever
         # Gemini is unconfigured or unreachable.
-        # GPU layers: an explicit num_gpu wins. Otherwise, when Whisper is not
-        # on the GPU (text mode, or --no-gpu) the card is the model's alone, so
-        # force every layer on — Ollama's own estimate leaves a quarter of the
-        # model on the CPU that would fit. With Whisper there, let Ollama split.
-        num_gpu = ollama_cfg.get("num_gpu")
-        if num_gpu is None and (text_only or whisper_device == "cpu"):
-            num_gpu = ollama_cfg.get("num_gpu_when_free", 99)
+        # GPU layers: default to all of them. Ollama's own estimate is cautious
+        # and leaves a quarter of the 4B on the CPU even though it fits — next
+        # to Whisper too (measured: 3.56 of 4 GB, 38 tok/s vs 26 when split).
+        # If a forced load ever fails, LocalBrain falls back to Ollama's split.
+        # Set ollama.num_gpu: null in config.yaml to always let Ollama decide.
+        num_gpu = ollama_cfg.get("num_gpu", 99)
 
         self.local_brain = LocalBrain(
             model=ollama_cfg.get("model", "qwen3.5-4b-q3km-text"),

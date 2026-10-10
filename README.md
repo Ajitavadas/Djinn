@@ -43,6 +43,10 @@ matters on Windows 11 with **Smart App Control** on, because it blocks
 
 ## Setup
 
+**New machine?** [SETUP.md](SETUP.md) has every step in order, from a fresh
+Windows install to a running Djinn, with troubleshooting. Below is the short
+version.
+
 ```bash
 git clone https://github.com/Ajitavadas/djinn.git
 cd djinn

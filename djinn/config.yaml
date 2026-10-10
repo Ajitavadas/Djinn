@@ -102,26 +102,39 @@ memory:
 # Local model, served by Ollama. Used when mode is "local" (--mode local,
 # /local, or the badge), and as the fallback whenever Gemini is unreachable.
 ollama:
-  # Qwen3.5-2B at Q4_K_M: 1.6 GB loaded, so it sits entirely on a 4 GB GPU
-  # with room left for Whisper. Measured on a GTX 1650 Ti: ~75 tokens/s and
-  # 2-3s for a full answer.
+  # Qwen3.5-4B at Q3_K_M, text only. Both models are built by
+  # scripts/setup_local_models.ps1 from the same weights file.
   #
-  # qwen3.5:4b is the stronger coder (55.8 on LiveCodeBench v6), but at 3.7 GB
-  # it only half fits on a 4 GB card, so the CPU runs the rest: ~8 tokens/s,
-  # 10-17s per answer. Shrinking num_ctx does not help — the weights are what
-  # don't fit. Use it if you value code quality over speed.
-  model: "qwen3.5:2b-q4_K_M"
+  # Measured on a GTX 1650 Ti (12 coding problems with unit tests,
+  # scripts/code_eval.py, thinking off):
+  #   qwen3.5:2b-q4_K_M        2/12   ~7s/problem   74 tok/s  all on GPU
+  #   qwen3.5:4b (Q4_K_M)      8/12  ~62s/problem  7.5 tok/s  48% on GPU
+  #   4B Q3_K_M + vision    8-10/12  ~28s/problem   10 tok/s  54% on GPU
+  #   4B Q3_K_M text-only   8-10/12  ~10s/problem   25 tok/s  74% on GPU
+  #     ...with num_gpu forced                      38 tok/s  all on GPU
+  #   9B IQ2_XXS               1/12 ~111s/problem    5 tok/s  43% on GPU
+  # Q3 scored as well as Q4 (the gap is within noise); 2-bit 9B is unusable.
+  model: "qwen3.5-4b-q3km-text"
+
+  # Same weights plus the vision projector, used only for messages carrying
+  # images. The projector costs ~0.7 GB of VRAM on every query, which on a
+  # 4 GB card pushes a quarter of the model onto the CPU — so it is not loaded
+  # for ordinary text.
+  vision_model: "qwen3.5-4b-q3km"
+
   base_url: "http://localhost:11434"
   num_ctx: 4096
 
-  # GPU layers. Leave unset and Ollama fits as many as the card has room for
-  # and runs the rest on CPU — on a 4 GB card shared with Whisper that is
-  # usually a split. 0 forces CPU only (frees the GPU entirely for Whisper).
+  # GPU layers. Left unset, Djinn forces all layers onto the GPU when Whisper
+  # is not there (text mode or --no-gpu) — Ollama's own estimate is cautious
+  # and would leave a quarter of the model on the CPU — and lets Ollama split
+  # when Whisper shares the card. If a forced load fails, Djinn falls back to
+  # Ollama's split. Set a number to override; 0 = CPU only.
   # num_gpu: 0
 
-  # Qwen3.5 can reason before answering. Off for the same reason Gemini's fast
-  # tier is: seconds of silence before the first word. Turn on for hard
-  # coding questions in text mode.
+  # Qwen3.5 can reason before answering. Off by default: on this hardware it
+  # costs 2-3 minutes per answer, which is dead air for a voice assistant. In
+  # the chat window, /think <question> turns it on for one question.
   think: false
 
   # How long Ollama keeps the weights loaded after the last query.

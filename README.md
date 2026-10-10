@@ -24,7 +24,7 @@ A **router** classifies each query with regex, so no latency is wasted deciding:
 | `local` | Answered in-process — time, date. No model call. | ~0ms |
 | `fast` | Gemini 2.5 Flash, thinking disabled | ~1s |
 | `deep` | Gemini 2.5 Pro, thinking enabled | ~3s |
-| `ollama` | Qwen3.5-2B on your own machine, via Ollama | ~2-3s on a 4 GB GPU |
+| `ollama` | Qwen3.5-4B on your own machine, via Ollama | ~2-10s on a 4 GB GPU |
 
 You can override the router at any time — see **Modes** below. The local
 model is never picked automatically while Gemini works. It is used when you pin
@@ -66,21 +66,38 @@ Then copy `.env.example` to `.env` and set `GOOGLE_CLOUD_PROJECT`.
 [kokoro-onnx releases](https://github.com/thewh1teagle/kokoro-onnx/releases).
 
 **Optional: the local model.** Install [Ollama](https://ollama.com/download),
-then pull the model:
+then build the models (downloads 3 GB from Hugging Face):
 
-```bash
-ollama pull qwen3.5:2b-q4_K_M    # 1.9 GB download, 1.6 GB loaded
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup_local_models.ps1
 ```
 
-The default is Qwen3.5-2B because it fits entirely on a 4 GB GPU next to
-Whisper. On a GTX 1650 Ti it generates ~75 tokens/s and answers in 2–3s, and
-it supports tool calling.
+This creates two Ollama models from the same Qwen3.5-4B Q3_K_M weights:
 
-`qwen3.5:4b` (3.3 GB) is the stronger coder (55.8 on LiveCodeBench v6), but on
-a 4 GB card only about half of it fits on the GPU. The CPU runs the rest at
-~8 tokens/s, so answers take 10–17s. A smaller `num_ctx` doesn't help because
-the weights are what don't fit. Pull it and set `ollama.model` if you have
-more VRAM or prefer quality over speed.
+| Model | Used for | Loaded size |
+|---|---|---|
+| `qwen3.5-4b-q3km-text` | Every normal query | 2.5 GB |
+| `qwen3.5-4b-q3km` | Messages that carry an image | 3.0 GB + buffers |
+
+Vision is a separate model because its projector takes ~0.7 GB of VRAM on
+every query. On a 4 GB card that pushes a quarter of the language model onto
+the CPU, so Djinn only loads it when there is an image to look at.
+
+Why this model? On a GTX 1650 Ti, with 12 coding problems checked by unit
+tests (`scripts/code_eval.py`):
+
+| Model | Passed | Per problem | Speed | On GPU |
+|---|---|---|---|---|
+| Qwen3.5-2B Q4_K_M | 2/12 | ~7s | 74 tok/s | 100% |
+| Qwen3.5-4B Q4_K_M (`qwen3.5:4b`) | 8/12 | ~62s | 7.5 tok/s | 48% |
+| **Qwen3.5-4B Q3_K_M, text only** | 8–10/12 | ~10s | 25–38 tok/s | 74–100% |
+| Qwen3.5-9B IQ2_XXS | 1/12 | ~111s | 5 tok/s | 43% |
+
+Q3 scores as well as Q4 (the gap is within noise), and fits on the GPU. The
+2-bit 9B writes plausible-looking code that does not work. Note that Windows
+reserves ~0.8 GB of any GPU for itself, so a 4 GB card has ~2.8 GB left for
+models. In text mode Djinn forces every layer onto the GPU (Ollama's estimate is
+cautious); with Whisper sharing the card it lets Ollama split.
 
 ## Run
 
@@ -109,6 +126,11 @@ shortcuts (time, date) stay instant in every mode.
 
 The local model gets the same tools as Gemini, except `web_search`, which runs
 through Gemini and so needs a connection.
+
+**Thinking.** In the chat window, `/think <question>` makes the model reason
+before answering, for that one question. On the local model this is slow (1–3
+minutes on a 4 GB GPU) but catches mistakes it would otherwise blurt out. With
+Gemini it uses the deep tier.
 
 ## Tools
 

@@ -273,7 +273,7 @@ class ChatWindow:
             "system",
             "Djinn is ready. Type and press Enter.  "
             "Ctrl+M or the badge above cycles AUTO / FAST / PRO / LOCAL "
-            "(or type /auto, /fast, /pro, /local).",
+            "(or type /auto, /fast, /pro, /local). /think <question> reasons first.",
         )
 
         # --- Keyboard focus ---------------------------------------------

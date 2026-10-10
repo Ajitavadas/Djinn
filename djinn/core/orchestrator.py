@@ -123,11 +123,20 @@ class Orchestrator:
 
         # Local model: pinned with the "local" mode, and the fallback whenever
         # Gemini is unconfigured or unreachable.
+        # GPU layers: an explicit num_gpu wins. Otherwise, when Whisper is not
+        # on the GPU (text mode, or --no-gpu) the card is the model's alone, so
+        # force every layer on — Ollama's own estimate leaves a quarter of the
+        # model on the CPU that would fit. With Whisper there, let Ollama split.
+        num_gpu = ollama_cfg.get("num_gpu")
+        if num_gpu is None and (text_only or whisper_device == "cpu"):
+            num_gpu = ollama_cfg.get("num_gpu_when_free", 99)
+
         self.local_brain = LocalBrain(
-            model=ollama_cfg.get("model", "qwen3.5:2b-q4_K_M"),
+            model=ollama_cfg.get("model", "qwen3.5-4b-q3km-text"),
+            vision_model=ollama_cfg.get("vision_model", ""),
             base_url=ollama_cfg.get("base_url", "http://localhost:11434"),
             num_ctx=ollama_cfg.get("num_ctx", 4096),
-            num_gpu=ollama_cfg.get("num_gpu"),
+            num_gpu=num_gpu,
             think=ollama_cfg.get("think", False),
             keep_alive=ollama_cfg.get("keep_alive", "30m"),
             options=ollama_cfg.get("options"),
@@ -318,20 +327,38 @@ class Orchestrator:
                     self._chat_window.append_message(
                         "system", "Conversation memory cleared."
                     )
+                elif cmd == "think" or cmd.startswith("think "):
+                    question = text[1:].strip()[len("think"):].strip()
+                    if not question:
+                        self._chat_window.append_message(
+                            "system",
+                            "Usage: /think <question> — reason before answering, "
+                            "for one question.",
+                        )
+                    else:
+                        self._chat_window.append_message(
+                            "system",
+                            "Thinking before answering. On the local model this "
+                            "can take a few minutes.",
+                        )
+                        await self._process_query(question, think=True)
                 else:
                     self._chat_window.append_message(
                         "system",
                         f"Unknown command /{cmd}. "
-                        "Try /auto, /fast, /pro, /local, /clear.",
+                        "Try /auto, /fast, /pro, /local, /think <question>, /clear.",
                     )
                 continue
 
             await self._process_query(text)
 
-    async def _process_query(self, query: str) -> None:
+    async def _process_query(self, query: str, think: bool = False) -> None:
         """Process a single user query through the full pipeline.
 
         Flow: route → get context → send to brain → speak response → update memory
+
+        think=True asks for reasoning before the answer, for this query only:
+        the local model turns its thinking on, and Gemini uses the deep tier.
         """
         t0 = time.perf_counter()
 
@@ -359,16 +386,18 @@ class Orchestrator:
 
         # 3. Send to brain. History goes as real message turns, not spliced
         #    into the prompt, so it is sent exactly once.
+        if think and target == "flash":
+            target = "pro"
         deep = target == "pro"
 
         if self.streaming:
-            await self._respond_streaming(query, target, t0)
+            await self._respond_streaming(query, target, t0, think)
             return
 
         try:
             if target == "ollama":
                 response = await self.local_brain.chat(
-                    query, history=self._local_history()
+                    query, history=self._local_history(), think=think
                 )
             else:
                 try:
@@ -380,7 +409,7 @@ class Orchestrator:
                         raise
                     log.warning("Gemini unreachable (%s) — using the local model", e)
                     response = await self.local_brain.chat(
-                        query, history=self._local_history()
+                        query, history=self._local_history(), think=think
                     )
         except GeminiUnreachable:
             response = "I can't reach Gemini, and the local model isn't running."
@@ -396,7 +425,7 @@ class Orchestrator:
         history = self.memory.get_history()
         return history[-self.local_window:] if self.local_window else []
 
-    async def _brain_stream(self, query: str, target: str):
+    async def _brain_stream(self, query: str, target: str, think: bool = False):
         """Stream from the brain for this target, falling back to local if offline.
 
         GeminiUnreachable is only raised before Gemini has said anything, so
@@ -404,7 +433,7 @@ class Orchestrator:
         """
         if target == "ollama":
             async for chunk in self.local_brain.stream(
-                query, history=self._local_history()
+                query, history=self._local_history(), think=think
             ):
                 yield chunk
             return
@@ -421,11 +450,13 @@ class Orchestrator:
                 return
             log.warning("Gemini unreachable (%s) — using the local model", e)
             async for chunk in self.local_brain.stream(
-                query, history=self._local_history()
+                query, history=self._local_history(), think=think
             ):
                 yield chunk
 
-    async def _respond_streaming(self, query: str, target: str, t0: float) -> None:
+    async def _respond_streaming(
+        self, query: str, target: str, t0: float, think: bool = False
+    ) -> None:
         """Stream the answer straight into the voice, speaking as it arrives.
 
         The text is tee'd: each chunk goes to the speaker and, in text mode, to
@@ -441,7 +472,7 @@ class Orchestrator:
             if window:
                 window.begin_stream()
             try:
-                async for chunk in self._brain_stream(query, target):
+                async for chunk in self._brain_stream(query, target, think):
                     if first_chunk_at is None:
                         first_chunk_at = time.perf_counter()
                     chunks.append(chunk)
